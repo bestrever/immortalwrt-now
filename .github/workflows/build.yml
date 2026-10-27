@@ -13,6 +13,12 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # run #4 教训：Clone 步骤把 openwrt 软链到 /workdir/openwrt，cd openwrt 后
+    # 相对父目录路径解析为 /workdir 而非仓库根，diy 脚本与 config 全找不到。本轮改用
+    # $GITHUB_WORKSPACE 绝对路径引用仓库根文件，cwd 仍留在 openwrt 内。
+    # 只发 Release：Release 步骤用 gh 创建/上传同一 Release，需写 contents 权限。
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -95,8 +101,8 @@ jobs:
       - name: Run diy-part1 (before feeds update)
         run: |
           cd openwrt
-          chmod +x "../$DIY_P1_SH"
-          "../$DIY_P1_SH"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
       - name: Update and install feeds
         run: |
@@ -106,16 +112,16 @@ jobs:
 
       - name: Run diy-part2 (after feeds install)
         env:
-          CONFIG_FILE: ${{ matrix.config }}
+          CONFIG_FILE: ${{ github.workspace }}/${{ matrix.config }}
         run: |
           cd openwrt
-          chmod +x "../$DIY_P2_SH"
-          CONFIG_FILE="../$CONFIG_FILE" "../$DIY_P2_SH"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          CONFIG_FILE="$CONFIG_FILE" "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
       - name: Load custom configuration
         run: |
           cd openwrt
-          cp "../${{ matrix.config }}" .config
+          cp "$GITHUB_WORKSPACE/${{ matrix.config }}" .config
           make defconfig
           echo "=== device actually selected ==="
           grep -q "${{ matrix.check_device }}" .config || { echo "MISSING device: ${{ matrix.check_device }}"; exit 1; }
@@ -123,7 +129,7 @@ jobs:
           echo "=== every DEVICE line in the source config must survive defconfig ==="
           while IFS= read -r line; do
             grep -q "^${line}$" .config && echo "OK   $line" || { echo "DROPPED device line: $line"; exit 1; }
-          done < <(grep '^CONFIG_TARGET_' "../${{ matrix.config }}" | grep 'DEVICE_')
+          done < <(grep '^CONFIG_TARGET_' "$GITHUB_WORKSPACE/${{ matrix.config }}" | grep 'DEVICE_')
           echo "=== required packages actually selected ==="
           for pkg in ${{ matrix.check_packages }}; do
             grep -q "CONFIG_PACKAGE_${pkg}=y" .config && echo "OK   $pkg" || { echo "MISSING $pkg (defconfig dropped it: feed/package name wrong)"; exit 1; }
@@ -151,9 +157,28 @@ jobs:
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
           ls -lh
 
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: immortalwrt-${{ matrix.target }}${{ env.FILE_DATE }}
-          path: ${{ env.FIRMWARE }}
-          retention-days: 7
+      - name: Publish firmware to Release (no artifact)
+        # 只发 Release：4 个并行任务共用一个 Release（tag build-<run number>）。
+        # 首个任务建 Release，其余任务在循环里等它出现；同名文件用 --clobber 覆盖
+        # （重跑同一 run number 时复用同一 tag）。只传镜像文件，不传 sha256sums
+        # 与 buildinfo（各目标同名，会互相覆盖）。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=( "$FIRMWARE"/*.img* "$FIRMWARE"/*.bin "$FIRMWARE"/*.vmdk "$FIRMWARE"/*.qcow2* "$FIRMWARE"/*.vhdx* )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No firmware files found in $FIRMWARE"
+            ls -lh "$FIRMWARE"
+            exit 1
+          fi
+          ls -lh "${files[@]}"
+          TAG="build-${{ github.run_number }}"
+          for i in 1 2 3 4 5 6; do
+            if gh release view "$TAG" >/dev/null 2>&1; then break; fi
+            if gh release create "$TAG" --title "ImmortalWrt build #${{ github.run_number }}" --notes "ImmortalWrt firmware built by GitHub Actions. Run #${{ github.run_number }}, commit ${{ github.sha }}. Back up your existing router configuration before flashing." 2>/dev/null; then break; fi
+            sleep 15
+          done
+          gh release view "$TAG" >/dev/null || { echo "Release $TAG not found after retries"; exit 1; }
+          gh release upload "$TAG" --clobber -- "${files[@]}"
+          gh release view "$TAG" --json assets --jq '.assets[].name'
