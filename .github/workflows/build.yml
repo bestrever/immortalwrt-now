@@ -48,11 +48,16 @@ jobs:
         # 随后 apt 安装依赖时写盘失败，4 个任务全在 "Install build dependencies" 倒下，
         # 我们的配置/feeds 根本没跑到。改直接删 runner 上最大的预装目录（都在根分区上，
         # 正好是 apt 写盘的位置），不做 LVM 重挂载。
+        # run #3 教训：删掉 maximize-build-space 后 /workdir 不再被自动创建，
+        # "Clone source code" 的 working-directory: /workdir 启动即报 No such file or directory，
+        # 4 个任务全倒在这一步（此前步骤均已成功）。这里显式建目录并归当前用户所有。
         run: |
           df -hT
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache \
             /usr/local/share/boost /opt/az /usr/share/swift /opt/microsoft
           sudo apt-get clean
+          sudo mkdir -p /workdir
+          sudo chown "$(whoami)" /workdir
           df -hT
 
       - name: Install build dependencies
