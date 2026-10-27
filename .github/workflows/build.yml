@@ -1,0 +1,152 @@
+name: Build ImmortalWrt (4 targets)
+
+# 手动触发，不设定时任务。4 个目标并行编，首次全量每台约 1-3 小时，GitHub 单任务上限 6 小时。
+on:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            config: configs/x86_64.config
+            branch: openwrt-24.10
+            check_device: "CONFIG_TARGET_x86_64_DEVICE_generic=y"
+            check_packages: "luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis"
+          - target: r4s
+            config: configs/r4s.config
+            branch: openwrt-24.10
+            check_device: "CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
+            check_packages: "luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis"
+          - target: cr660x
+            config: configs/cr660x.config
+            branch: openwrt-24.10
+            check_device: "CONFIG_TARGET_DEVICE_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6606=y"
+            check_packages: "luci-app-passwall2"
+          - target: athena
+            config: configs/athena.config
+            # 注意：雅典娜 RE-CS-02 在 openwrt-24.10 里没有设备 profile（仅 master 有），
+            # 本项默认走 master，见 README；如用户决定不编雅典娜，删掉本项即可。
+            branch: master
+            check_device: "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02=y"
+            check_packages: "luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon kmod-usb-net-rndis"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex \
+            gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool lib32gcc-s1 \
+            libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses5-dev libncursesw5 libncursesw5-dev libreadline-dev libssl-dev libtool lld \
+            lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
+            python3-pip python3-ply python3-docutils qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo timedatectl set-timezone "$TZ" || true
+
+      - name: Clone source code
+        working-directory: /workdir
+        run: |
+          df -hT
+          git clone --depth 1 "$REPO_URL" -b "${{ matrix.branch }}" openwrt
+          ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/staging_dir/host*
+            openwrt/staging_dir/tool*
+            openwrt/.ccache
+          key: immortalwrt-${{ matrix.branch }}-${{ matrix.target }}-${{ hashFiles(matrix.config) }}
+          restore-keys: |
+            immortalwrt-${{ matrix.branch }}-${{ matrix.target }}-
+
+      - name: Run diy-part1 (before feeds update)
+        run: |
+          cd openwrt
+          chmod +x "../$DIY_P1_SH"
+          "../$DIY_P1_SH"
+
+      - name: Update and install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Run diy-part2 (after feeds install)
+        env:
+          CONFIG_FILE: ${{ matrix.config }}
+        run: |
+          cd openwrt
+          chmod +x "../$DIY_P2_SH"
+          CONFIG_FILE="../$CONFIG_FILE" "../$DIY_P2_SH"
+
+      - name: Load custom configuration
+        run: |
+          cd openwrt
+          cp "../${{ matrix.config }}" .config
+          make defconfig
+          echo "=== device actually selected ==="
+          grep -q "${{ matrix.check_device }}" .config || { echo "MISSING device: ${{ matrix.check_device }}"; exit 1; }
+          echo "OK device: ${{ matrix.check_device }}"
+          echo "=== every DEVICE line in the source config must survive defconfig ==="
+          while IFS= read -r line; do
+            grep -q "^${line}$" .config && echo "OK   $line" || { echo "DROPPED device line: $line"; exit 1; }
+          done < <(grep '^CONFIG_TARGET_' "../${{ matrix.config }}" | grep 'DEVICE_')
+          echo "=== required packages actually selected ==="
+          for pkg in ${{ matrix.check_packages }}; do
+            grep -q "CONFIG_PACKAGE_${pkg}=y" .config && echo "OK   $pkg" || { echo "MISSING $pkg (defconfig dropped it: feed/package name wrong)"; exit 1; }
+          done
+
+      - name: Download packages
+        run: |
+          cd openwrt
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile firmware
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j"$(nproc)" || make -j1 || make -j1 V=s
+
+      - name: Organize files
+        id: organize
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+          ls -lh
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ matrix.target }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+          retention-days: 7
