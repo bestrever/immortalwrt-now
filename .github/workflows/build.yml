@@ -218,7 +218,7 @@ jobs:
         run: |
           cd openwrt
           echo -e "$(nproc) thread compile"
-          make -j"$(nproc)" || make -j"$(nproc)" || { echo "parallel compile failed twice; cleaning toolchain for a fresh retry"; make toolchain/clean || true; make -j"$(nproc)" || make -j1 V=s; }
+          make -j"$(nproc)" || make -j1 V=s
 
       - name: Organize files
         id: organize
