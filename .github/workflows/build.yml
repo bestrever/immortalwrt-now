@@ -68,17 +68,27 @@ jobs:
 
       - name: Install build dependencies
               # run #6/#7 教训：r4s 编 u-boot 时 Download packages 的 prereq 检查报 python3-pyelftools 缺失（exit 2），须随依赖一起装。
+              # run #8 教训：athena（master）编 gn [host] 时报 error: invalid value 'c++23' in '-std=c++23'，因 ubuntu-22.04 自带 clang 14 不认识 C++23 拼写（需 Clang 17+）。加 apt.llvm.org 源装 clang-18/lld-18，并把 clang/clang++/lld 默认指向 18 版，其余不动、仍用 ubuntu-22.04。
         run: |
           df -hT
           sudo apt-get update -y
+          sudo apt-get install -y gnupg
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+          sudo apt-get update -y
           sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex \
+            build-essential bzip2 ccache clang clang-18 cmake cpio curl device-tree-compiler ecj fastjar flex \
             gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool lib32gcc-s1 \
             libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
-            libncurses5-dev libncursesw5 libncursesw5-dev libreadline-dev libssl-dev libtool lld \
+            libncurses5-dev libncursesw5 libncursesw5-dev libreadline-dev libssl-dev libtool lld lld-18 \
             lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
             python3-pyelftools python3-pip python3-ply python3-docutils qemu-utils re2c rsync scons squashfs-tools \
             subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+          if [ -x /usr/bin/lld-18 ]; then sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-18 100; fi
+          clang --version
+          clang++ --version
           sudo timedatectl set-timezone "$TZ" || true
 
       - name: Clone source code
