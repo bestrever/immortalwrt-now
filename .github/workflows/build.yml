@@ -17,6 +17,16 @@ on:
           - r4s
           - cr660x
           - athena
+      storage:
+        description: 'Root filesystem size for x86_64/r4s/athena (ignored for cr660x, fixed 128MB NAND)'
+        required: true
+        default: '512MB'
+        type: choice
+        options:
+          - 512MB
+          - 1GB
+          - 2GB
+          - 4GB
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
@@ -40,24 +50,31 @@ jobs:
       - name: Select target configuration
         # 一次一台：按下拉框所选设备，定分支/config/设备校验行/插件校验清单。
         run: |
+          case "${{ inputs.storage }}" in
+            512MB) STORAGE_MB=512 ;;
+            1GB) STORAGE_MB=1024 ;;
+            2GB) STORAGE_MB=2048 ;;
+            4GB) STORAGE_MB=4096 ;;
+            *) echo "Unknown storage: ${{ inputs.storage }}"; exit 1 ;;
+          esac
           case "${{ inputs.target }}" in
             x86_64)
               CONFIG=configs/x86_64.config
               BRANCH=openwrt-24.10
               CHECK_DEVICE='CONFIG_TARGET_x86_64_DEVICE_generic=y'
-              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis'
+              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis docker dockerd luci-app-dockerman'
               ;;
             r4s)
               CONFIG=configs/r4s.config
               BRANCH=openwrt-24.10
               CHECK_DEVICE='CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y'
-              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis'
+              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon luci-app-argon-config kmod-usb-net-rndis docker dockerd luci-app-dockerman'
               ;;
             cr660x)
               CONFIG=configs/cr660x.config
               BRANCH=openwrt-24.10
               CHECK_DEVICE='CONFIG_TARGET_DEVICE_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6606=y'
-              CHECK_PACKAGES='luci-app-passwall2 luci-app-mosdns'
+              CHECK_PACKAGES='luci-app-passwall2 luci-app-mosdns luci-theme-argon luci-app-argon-config'
               ;;
             athena)
               # 注意：雅典娜 RE-CS-02 在 openwrt-24.10 里没有设备 profile（仅 master 有），
@@ -65,7 +82,7 @@ jobs:
               CONFIG=configs/athena.config
               BRANCH=master
               CHECK_DEVICE='CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02=y'
-              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon kmod-usb-net-rndis'
+              CHECK_PACKAGES='luci-app-passwall luci-app-passwall2 luci-app-openclash luci-app-mosdns luci-app-homeproxy luci-app-ssr-plus luci-theme-argon kmod-usb-net-rndis docker dockerd luci-app-dockerman'
               ;;
             *)
               echo "Unknown target: ${{ inputs.target }}"
@@ -78,8 +95,9 @@ jobs:
             echo "BRANCH=$BRANCH"
             echo "CHECK_DEVICE=$CHECK_DEVICE"
             echo "CHECK_PACKAGES=$CHECK_PACKAGES"
+            echo "STORAGE_MB=$STORAGE_MB"
           } >> "$GITHUB_ENV"
-          echo "target=${{ inputs.target }} config=$CONFIG branch=$BRANCH"
+          echo "target=${{ inputs.target }} config=$CONFIG branch=$BRANCH storage=${{ inputs.storage }} (${STORAGE_MB}MB)"
 
       - name: Free disk space
         # run #1 教训：easimon/maximize-build-space 跑完后根分区反而 100%（仅剩 100M），
@@ -159,7 +177,17 @@ jobs:
         run: |
           cd openwrt
           cp "$GITHUB_WORKSPACE/$CONFIG" .config
+          # 储存空间（仅 x86_64/r4s/athena）：按下发框所选覆盖 ROOTFS_PARTSIZE；
+          # cr660x 的 NAND 大小固定，忽略该选项。
+          if [ "$TARGET" != "cr660x" ]; then
+            sed -i '/^CONFIG_TARGET_ROOTFS_PARTSIZE=/d' .config
+            echo "CONFIG_TARGET_ROOTFS_PARTSIZE=$STORAGE_MB" >> .config
+            echo "rootfs partsize: ${STORAGE_MB}MB (storage option: ${{ inputs.storage }})"
+          fi
           make defconfig
+          # 软核实：ROOTFS_PARTSIZE 在某些目标（如 UBI/NAND 布局）上可能不是有效符号，
+          # defconfig 会丢掉它——只提示，不因此失败，实际效果从建成镜像核实。
+          grep "^CONFIG_TARGET_ROOTFS_PARTSIZE=" .config || echo "NOTE: ROOTFS_PARTSIZE not present for $TARGET (target may size rootfs differently)"
           echo "=== device actually selected ==="
           grep -q "$CHECK_DEVICE" .config || { echo "MISSING device: $CHECK_DEVICE"; exit 1; }
           echo "OK device: $CHECK_DEVICE"
