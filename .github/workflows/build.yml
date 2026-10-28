@@ -157,10 +157,15 @@ jobs:
               # run #5 教训：x86_64 在 Compile firmware 里 6 小时超时被取消。并行 make 在
               # mihomo 处报错后，原来的 make -j1 单线程重编在剩余时间内根本编不完。
               # 改为先并行重试一次（已编好的工作增量复用），仍失败才单线程详细日志。
+              # run #10 教训：cr660x 在 toolchain/binutils（gas 的 as-new 链接目标）上 exit 2，
+              # 且最后一次尝试的 binutils 计时仅 0.48 秒——并行重试只是在重复跑同一个已坏的
+              # 增量构建状态，根本没有重编 binutils。第三次重试前先 make toolchain/clean，
+              # 把工具链清干净再并行重编（仍失败才单线程详细日志），让重试真正重建、
+              # 让详细日志里出现真正的报错命令，而不是 0.48 秒的重复失败。
         run: |
           cd openwrt
           echo -e "$(nproc) thread compile"
-          make -j"$(nproc)" || make -j"$(nproc)" || make -j1 V=s
+          make -j"$(nproc)" || make -j"$(nproc)" || { echo "parallel compile failed twice; cleaning toolchain for a fresh retry"; make toolchain/clean || true; make -j"$(nproc)" || make -j1 V=s; }
 
       - name: Organize files
         id: organize
